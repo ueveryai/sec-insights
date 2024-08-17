@@ -59,7 +59,7 @@ from app.chat.constants import (
 )
 from app.chat.tools import get_api_query_engine_tool
 from app.chat.utils import build_title_for_document
-from app.chat.pg_vector import get_vector_store
+from app.chat.pg_vector import get_vector_store, get_vector_store_singleton
 from app.chat.qa_response_synth import get_custom_response_synth
 
 
@@ -155,21 +155,52 @@ def get_storage_context(
 
 
 async def build_doc_id_to_index_map(
+    service_context: ServiceContext,
     documents: List[DocumentSchema],
-) -> Dict[str, PGVector]:
+    fs: Optional[AsyncFileSystem] = None,
+) -> Dict[str, VectorStoreIndex]:
     persist_dir = f"{settings.S3_BUCKET_NAME}"
 
-    # get vector store that have been globally declared
-
-    doc_id_to_index = {}
-    for doc in documents:
-        langchain_docs = fetch_and_read_document(doc)
-        vector_store = await get_vector_store()
-        vector_store.add_documents(
-            langchain_docs, ids=[doc_.metadata["id"] for doc_ in langchain_docs]
+    vector_store = await get_vector_store_singleton()
+    try:
+        try:
+            storage_context = get_storage_context(persist_dir, vector_store, fs=fs)
+        except FileNotFoundError:
+            logger.info(
+                "Could not find storage context in S3. Creating new storage context."
+            )
+            storage_context = StorageContext.from_defaults(
+                vector_store=vector_store, fs=fs
+            )
+            storage_context.persist(persist_dir=persist_dir, fs=fs)
+        index_ids = [str(doc.id) for doc in documents]
+        indices = load_indices_from_storage(
+            storage_context,
+            index_ids=index_ids,
+            service_context=service_context,
         )
-
-        doc_id_to_index[str(doc.id)] = vector_store.as_retriever(search_kwargs={"k": 3})
+        doc_id_to_index = dict(zip(index_ids, indices))
+        logger.debug("Loaded indices from storage.")
+    except ValueError:
+        logger.error(
+            "Failed to load indices from storage. Creating new indices. "
+            "If you're running the seed_db script, this is normal and expected."
+        )
+        storage_context = StorageContext.from_defaults(
+            persist_dir=persist_dir, vector_store=vector_store, fs=fs
+        )
+        doc_id_to_index = {}
+        for doc in documents:
+            llama_index_docs = fetch_and_read_document(doc)
+            storage_context.docstore.add_documents(llama_index_docs)
+            index = VectorStoreIndex.from_documents(
+                llama_index_docs,
+                storage_context=storage_context,
+                service_context=service_context,
+            )
+            index.set_index_id(str(doc.id))
+            index.storage_context.persist(persist_dir=persist_dir, fs=fs)
+            doc_id_to_index[str(doc.id)] = index
     return doc_id_to_index
 
 
