@@ -1,3 +1,6 @@
+from langchain_postgres.vectorstores import PGVector
+from langchain_openai import OpenAIEmbeddings
+
 from llama_index.vector_stores.types import VectorStore
 from llama_index.vector_stores.postgres import PGVectorStore
 from sqlalchemy.engine import make_url
@@ -67,4 +70,26 @@ async def get_vector_store_singleton() -> VectorStore:
         url.password,
         settings.VECTOR_STORE_TABLE_NAME,
     )
+
     return singleton_instance
+
+
+async def get_vector_store(
+    embeddings=OpenAIEmbeddings(api_key=settings.OPENAI_API_KEY),
+) -> PGVector:
+    # global singleton_instance
+    # if singleton_instance is not None:
+    #     return singleton_instance
+
+    url = "postgresql+psycopg://user:password@localhost:5432/llama_app_db"
+    collection_name = "pg_vector_store"
+
+    vector_store = PGVector(
+        embeddings=embeddings,
+        collection_name=collection_name,
+        connection=url,
+        use_jsonb=True,
+        async_mode=False,
+    )
+
+    return vector_store

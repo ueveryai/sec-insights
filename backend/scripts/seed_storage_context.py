@@ -16,7 +16,9 @@ async def async_main_seed_storage_context():
         docs = await crud.fetch_documents(db)
     service_context = get_tool_service_context([])
     for doc in tqdm(docs, desc="Seeding storage with DB documents"):
-        await build_doc_id_to_index_map(service_context, [doc], fs=fs)
+        await build_doc_id_to_index_map(
+            service_context=service_context, documents=[doc], fs=fs
+        )
 
 
 def main_seed_storage_context():

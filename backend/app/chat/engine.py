@@ -3,7 +3,14 @@ import logging
 from pathlib import Path
 from datetime import datetime
 import s3fs
+import pymupdf
 from fsspec.asyn import AsyncFileSystem
+
+# import langchain neccessary modules
+from langchain_core.documents import Document
+from langchain_text_splitters import CharacterTextSplitter
+from langchain_postgres.vectorstores import PGVector
+
 from llama_index import (
     ServiceContext,
     VectorStoreIndex,
@@ -52,7 +59,7 @@ from app.chat.constants import (
 )
 from app.chat.tools import get_api_query_engine_tool
 from app.chat.utils import build_title_for_document
-from app.chat.pg_vector import get_vector_store_singleton
+from app.chat.pg_vector import get_vector_store, get_vector_store_singleton
 from app.chat.qa_response_synth import get_custom_response_synth
 
 
@@ -79,10 +86,11 @@ def get_s3_fs() -> AsyncFileSystem:
 
 def fetch_and_read_document(
     document: DocumentSchema,
-) -> List[LlamaIndexDocument]:
+) -> List[Document]:  # -> List[LlamaIndexDocument]
     # Super hacky approach to get this to feature complete on time.
     # TODO: Come up with better abstractions for this and the other methods in this module.
     with TemporaryDirectory() as temp_dir:
+        # download PDF file from url
         temp_file_path = Path(temp_dir) / f"{str(document.id)}.pdf"
         with open(temp_file_path, "wb") as temp_file:
             with requests.get(document.url, stream=True) as r:
@@ -90,10 +98,25 @@ def fetch_and_read_document(
                 for chunk in r.iter_content(chunk_size=8192):
                     temp_file.write(chunk)
             temp_file.seek(0)
-            reader = PDFReader()
-            return reader.load_data(
-                temp_file_path, extra_info={DB_DOC_ID_KEY: str(document.id)}
-            )
+
+            # init a sentence splitter
+            text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+
+            # read PDF file
+            doc = pymupdf.open(temp_file_path)
+
+            text_chunks = []
+            for page in doc:
+                page_text = page.get_text("text")
+                cur_text_chunks = text_splitter.split_text(page_text)
+                text_chunks.extend(
+                    [
+                        Document(chunk, metadata={DB_DOC_ID_KEY: str(document.id)})
+                        for chunk in cur_text_chunks
+                    ]
+                )
+
+            return text_chunks
 
 
 def build_description_for_document(document: DocumentSchema) -> str:
@@ -178,6 +201,25 @@ async def build_doc_id_to_index_map(
             index.set_index_id(str(doc.id))
             index.storage_context.persist(persist_dir=persist_dir, fs=fs)
             doc_id_to_index[str(doc.id)] = index
+    return doc_id_to_index
+
+
+async def build_doc_id_to_retriever_map(
+    documents: List[DocumentSchema],
+) -> Dict[str, PGVector]:
+    persist_dir = f"{settings.S3_BUCKET_NAME}"
+
+    # get vector store that have been globally declared
+
+    doc_id_to_index = {}
+    for doc in documents:
+        langchain_docs = fetch_and_read_document(doc)
+        vector_store = await get_vector_store()
+        vector_store.add_documents(
+            langchain_docs, ids=[doc_.metadata["id"] for doc_ in langchain_docs]
+        )
+
+        doc_id_to_index[str(doc.id)] = vector_store.as_retriever(search_kwargs={"k": 3})
     return doc_id_to_index
 
 
@@ -343,15 +385,15 @@ Any questions about company-related financials or other metrics should be asked 
     return chat_engine
 
 
-
 async def get_chat_engine_v3(
     callback_handler: BaseCallbackHandler,
     conversation: ConversationSchema,
 ):
     chat_llm = OpenAI(model="gpt-3.5-turbo-0613")
 
-    chat_engine = OpenAIAgent.from_tools(llm = chat_llm, verbose = True)
+    chat_engine = OpenAIAgent.from_tools(llm=chat_llm, verbose=True)
     return chat_engine
+
 
 async def get_chat_engine_v2(
     callback_handler: BaseCallbackHandler,
@@ -361,16 +403,32 @@ async def get_chat_engine_v2(
     from langchain_core.prompts import ChatPromptTemplate
     from langchain_core.output_parsers import StrOutputParser
     from langchain_core.runnables import RunnableParallel, RunnablePassthrough
-    from langchain_openai import ChatOpenAI    
-    prompt = ChatPromptTemplate.from_template("""Answer the following question based only on the provided context:
+    from langchain_openai import ChatOpenAI
+    from langchain.retrievers import EnsembleRetriever
 
+    def format_docs(docs):
+        return "\n\n".join(doc.page_content for doc in docs)
 
-Question: {question}""")
-    
+    doc_id_to_retriever = await build_doc_id_to_retriever_map(conversation.documents)
+    id_to_doc: Dict[str, DocumentSchema] = {
+        str(doc.id): doc for doc in conversation.documents
+    }
+
+    ensemble_retriever = EnsembleRetriever(
+        retrievers=list(doc_id_to_retriever.values())
+    )
+
+    prompt = ChatPromptTemplate.from_template(
+        """Answer the following question based only on the provided context:
+        {context}
+
+Question: {question}"""
+    )
 
     setup_and_retrieval = RunnableParallel(
-        {"question": RunnablePassthrough()}
+        {"context": ensemble_retriever | format_docs, "question": RunnablePassthrough()}
     )
+
     llm = ChatOpenAI()
     parser = StrOutputParser()
     chain = setup_and_retrieval | prompt | llm | parser
