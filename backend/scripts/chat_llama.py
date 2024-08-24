@@ -73,7 +73,7 @@ class ConversationCmd(cmd.Cmd):
         super().__init__()
         self.base_url = base_url
         self.conversation_id = None
-        self.document_ids = []
+        self.document_ids = ["3af1fa45-8f6a-4eaa-9476-334effe202f1"]
 
     def do_pick_docs(self, args):
         "Pick documents for the new conversation: pick_docs"
@@ -85,6 +85,8 @@ class ConversationCmd(cmd.Cmd):
         except Exception as e:
             print(e)
             picker.do_quit("")
+
+        print("Selected doc:", picker.selected_documents)
         self.document_ids = [doc["id"] for doc in picker.selected_documents]
 
     def do_create(self, args):
