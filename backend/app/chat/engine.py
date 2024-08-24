@@ -93,7 +93,11 @@ def fetch_and_read_document(
         # download PDF file from url
         temp_file_path = Path(temp_dir) / f"{str(document.id)}.pdf"
         with open(temp_file_path, "wb") as temp_file:
-            with requests.get(document.url, stream=True) as r:
+            components = document.url.split("/")
+            components.insert(1, settings.S3_ASSET_BUCKET_NAME)  # insert bucket name
+            components.insert(0, "http:/")
+            D_URL = "/".join(components).replace("0.0.0.0", "localhost")
+            with requests.get(D_URL, stream=True) as r:
                 r.raise_for_status()
                 for chunk in r.iter_content(chunk_size=8192):
                     temp_file.write(chunk)
@@ -207,6 +211,9 @@ async def build_doc_id_to_index_map(
 async def build_doc_id_to_retriever_map(
     documents: List[DocumentSchema],
 ) -> Dict[str, PGVector]:
+    from langchain_community.vectorstores import FAISS
+    from langchain_openai import OpenAIEmbeddings
+
     persist_dir = f"{settings.S3_BUCKET_NAME}"
 
     # get vector store that have been globally declared
@@ -214,10 +221,14 @@ async def build_doc_id_to_retriever_map(
     doc_id_to_index = {}
     for doc in documents:
         langchain_docs = fetch_and_read_document(doc)
-        vector_store = await get_vector_store()
-        vector_store.add_documents(
-            langchain_docs, ids=[doc_.metadata["id"] for doc_ in langchain_docs]
+        vector_store = FAISS.from_documents(
+            documents=langchain_docs,
+            embedding=OpenAIEmbeddings(api_key=settings.OPENAI_API_KEY),
         )
+        # vector_store.add_documents(
+        #     langchain_docs,
+        #     ids=[doc_.metadata[DB_DOC_ID_KEY] for doc_ in langchain_docs],
+        # )
 
         doc_id_to_index[str(doc.id)] = vector_store.as_retriever(search_kwargs={"k": 3})
     return doc_id_to_index
