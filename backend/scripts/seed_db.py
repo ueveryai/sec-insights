@@ -1,4 +1,5 @@
 import sys
+
 # sys.path.append("/Users/henry/code/sec-insights/backend")
 from typing import List
 import asyncio
@@ -66,8 +67,10 @@ def seed_db(
 ):
     asyncio.run(async_seed_db(ciks, filing_types))
 
+
 def main():
     Fire(seed_db)
+
 
 if __name__ == "__main__":
     Fire(seed_db)
