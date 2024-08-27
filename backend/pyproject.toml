@@ -38,6 +38,7 @@ langchain-postgres = "^0.0.9"
 pysqlite3-binary = "^0.5.3.post1"
 faiss-cpu = "^1.8.0.post1"
 setuptools = "^73.0.1"
+pymupdf = "^1.24.9"
 
 [tool.poetry.group.dev.dependencies]
 pylint = "^2.17.4"
